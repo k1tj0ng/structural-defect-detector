@@ -1,0 +1,15 @@
+# Dataset (617 MB — download from Kaggle separately)
+ws/data/
+
+# Virtual environments
+ws/.venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# macOS
+.DS_Store
