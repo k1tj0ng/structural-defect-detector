@@ -13,8 +13,41 @@ MODEL_DIR = Path(__file__).parent
 st.set_page_config(
     page_title="Structural Defect Detector",
     page_icon="🏗️",
-    layout="centered",
+    layout="wide",
 )
+
+# ── Custom CSS ───────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .verdict-defect {
+        background: #ff4b4b22;
+        border: 2px solid #ff4b4b;
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #ff4b4b;
+    }
+    .verdict-ok {
+        background: #21c35422;
+        border: 2px solid #21c354;
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #21c354;
+    }
+    .stage-label {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #888;
+        margin-bottom: 2px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
 @st.cache_resource(show_spinner="Loading models…")
@@ -85,79 +118,115 @@ def gradcam_overlay(model, img_tensor, orig_arr):
         return None
 
 
-# ── UI ──────────────────────────────────────────────────────────────────────
+def run_pipeline(img_pil: Image.Image):
+    orig_arr, img_tensor = preprocess(img_pil)
+
+    struct_probs = struct_model.predict(img_tensor, verbose=0)[0]
+    struct_idx   = int(np.argmax(struct_probs))
+    struct_name  = STRUCTURES[struct_idx]
+    struct_conf  = float(struct_probs[struct_idx])
+
+    defect_model = defect_models[struct_name]
+    threshold    = thresholds[struct_name]
+    defect_prob  = float(defect_model.predict(img_tensor, verbose=0)[0][0])
+    is_defect    = defect_prob >= threshold
+
+    return struct_probs, struct_name, struct_conf, defect_model, threshold, defect_prob, is_defect, orig_arr, img_tensor
+
+
+def show_results(img_pil, struct_probs, struct_name, struct_conf,
+                 defect_model, threshold, defect_prob, is_defect, orig_arr, img_tensor):
+
+    col_img, col_pipe, col_verdict = st.columns([1.2, 1.2, 1], gap="large")
+
+    with col_img:
+        st.markdown('<p class="stage-label">Input image</p>', unsafe_allow_html=True)
+        st.image(img_pil, use_container_width=True)
+
+    with col_pipe:
+        st.markdown('<p class="stage-label">Stage 1 — Structure type</p>', unsafe_allow_html=True)
+        for i, s in enumerate(STRUCTURES):
+            bar_val = float(struct_probs[i])
+            is_top = (s == struct_name)
+            label = f"**{s}**" if is_top else s
+            st.markdown(label)
+            st.progress(bar_val, text=f"{bar_val:.0%}")
+
+        st.divider()
+
+        st.markdown('<p class="stage-label">Stage 2 — Defect probability</p>', unsafe_allow_html=True)
+        st.markdown(f"Model: `defect_model_{struct_name.lower()}`")
+        st.progress(min(defect_prob, 1.0), text=f"{defect_prob:.0%}")
+        st.caption(f"Threshold: {threshold} · recall-optimised")
+
+    with col_verdict:
+        st.markdown('<p class="stage-label">Verdict</p>', unsafe_allow_html=True)
+        if is_defect:
+            st.markdown(
+                '<div class="verdict-defect">⚠️<br>DEFECT<br>DETECTED</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="verdict-ok">✅<br>NO<br>DEFECT</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown(f"<br>Predicted structure: **{struct_name}** ({struct_conf:.0%})", unsafe_allow_html=True)
+
+    # Grad-CAM
+    with st.expander("🔍 Grad-CAM attention heatmap", expanded=False):
+        st.caption(
+            "Shows which regions the defect model focused on. "
+            "**Not ground-truth localisation** — dataset has no bounding-box annotations."
+        )
+        with st.spinner("Generating heatmap…"):
+            overlay = gradcam_overlay(defect_model, img_tensor, orig_arr)
+        if overlay is not None:
+            st.image(overlay, caption="Red = high model attention", use_container_width=True)
+        else:
+            st.warning("Grad-CAM could not be generated for this model.")
+
+
+# ── Header ───────────────────────────────────────────────────────────────────
 
 st.title("🏗️ Structural Defect Detector")
 st.caption(
-    "Upload a photo of a **deck, pavement, or wall**. "
-    "The model classifies the structure type then detects whether a defect (crack) is present."
+    "Two-stage CNN pipeline: **Stage 1** classifies structure type (Deck / Pavement / Wall) · "
+    "**Stage 2** detects defects, optimised for high recall (minimise missed cracks)."
 )
 
 struct_model, defect_models, thresholds = load_models()
 
-uploaded = st.file_uploader(
-    "Upload an image", type=["jpg", "jpeg", "png"], label_visibility="collapsed"
-)
+# ── Input tabs ───────────────────────────────────────────────────────────────
 
-if uploaded is None:
-    st.info("Upload an image to get started.")
+tab_camera, tab_upload = st.tabs(["📷 Live Camera", "📁 Upload Image"])
+
+img_pil = None
+
+with tab_camera:
+    st.info(
+        "Point your camera at a **wall, deck, or pavement** surface and click **Take Photo**. "
+        "The model will classify the structure type and check for cracks."
+    )
+    camera_image = st.camera_input("Take a photo", label_visibility="collapsed")
+    if camera_image is not None:
+        img_pil = Image.open(camera_image)
+
+with tab_upload:
+    uploaded = st.file_uploader(
+        "Upload an image", type=["jpg", "jpeg", "png"], label_visibility="collapsed"
+    )
+    if uploaded is not None:
+        img_pil = Image.open(uploaded)
+
+# ── Run pipeline ─────────────────────────────────────────────────────────────
+
+if img_pil is None:
     st.stop()
 
-img_pil = Image.open(uploaded)
-orig_arr, img_tensor = preprocess(img_pil)
+st.divider()
 
-col_img, col_results = st.columns([1, 1], gap="large")
+with st.spinner("Running pipeline…"):
+    results = run_pipeline(img_pil)
 
-with col_img:
-    st.image(img_pil, caption="Uploaded image", use_container_width=True)
-
-with col_results:
-    with st.spinner("Running…"):
-        # Stage 1 — structure
-        struct_probs = struct_model.predict(img_tensor, verbose=0)[0]
-        struct_idx   = int(np.argmax(struct_probs))
-        struct_name  = STRUCTURES[struct_idx]
-        struct_conf  = float(struct_probs[struct_idx])
-
-        # Stage 2 — defect
-        defect_model = defect_models[struct_name]
-        threshold    = thresholds[struct_name]
-        defect_prob  = float(defect_model.predict(img_tensor, verbose=0)[0][0])
-        is_defect    = defect_prob >= threshold
-
-    st.subheader("Results")
-
-    # Structure
-    st.markdown("**Structure type**")
-    bar_cols = st.columns(len(STRUCTURES))
-    for i, (col, s) in enumerate(zip(bar_cols, STRUCTURES)):
-        col.metric(s, f"{struct_probs[i]:.0%}")
-    st.success(f"Predicted: **{struct_name}** ({struct_conf:.0%} confidence)")
-
-    st.divider()
-
-    # Defect verdict
-    st.markdown("**Defect status**")
-    if is_defect:
-        st.error(f"⚠️ DEFECT DETECTED  ({defect_prob:.0%} probability)")
-    else:
-        st.success(f"✅ NO DEFECT  ({defect_prob:.0%} probability)")
-
-    st.caption(
-        f"Decision threshold: {threshold} · "
-        f"Optimised for high recall (minimise missed defects)"
-    )
-
-# ── Grad-CAM ────────────────────────────────────────────────────────────────
-
-with st.expander("🔍 Model attention heatmap (Grad-CAM)", expanded=False):
-    st.caption(
-        "Shows which regions the defect model focused on. "
-        "**Not ground-truth localisation** — the dataset has no bounding-box annotations."
-    )
-    with st.spinner("Generating heatmap…"):
-        overlay = gradcam_overlay(defect_model, img_tensor, orig_arr)
-    if overlay is not None:
-        st.image(overlay, caption="Grad-CAM overlay (red = high attention)", use_container_width=True)
-    else:
-        st.warning("Grad-CAM could not be generated for this model.")
+show_results(img_pil, *results)
