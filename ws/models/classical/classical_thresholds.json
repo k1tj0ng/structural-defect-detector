@@ -1,0 +1,17 @@
+{
+  "svm": {
+    "Decks": 0.2,
+    "Pavements": 0.2,
+    "Walls": 0.2
+  },
+  "knn": {
+    "Decks": 0.2,
+    "Pavements": 0.3,
+    "Walls": 0.2
+  },
+  "lr": {
+    "Decks": 0.5,
+    "Pavements": 0.5,
+    "Walls": 0.5
+  }
+}
